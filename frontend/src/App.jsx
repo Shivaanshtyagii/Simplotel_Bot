@@ -1,52 +1,86 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useRef, useCallback, useEffect } from 'react'
 
 const API_BASE_URL = 'http://localhost:8000'
 
 function App() {
   const [isListening, setIsListening] = useState(false)
-  const [transcript, setTranscript] = useState('')
+  const [isProcessing, setIsProcessing] = useState(false)
   const [messages, setMessages] = useState([])
   const [queryCount, setQueryCount] = useState(0)
   const [error, setError] = useState('')
-  
-  const recognitionRef = useRef(null)
-  const synthRef = useRef(null)
-  const finalTranscriptRef = useRef('')
+  const [status, setStatus] = useState('Idle') // 'Idle', 'Listening...', 'Processing...'
+  const [transcript, setTranscript] = useState('')
 
+  const recognitionRef = useRef(null)
+  const isRecognitionActiveRef = useRef(false)
+
+  // Text-to-Speech function - Initialize once
   const speakText = useCallback((text) => {
-    if (synthRef.current) {
+    if (!text || !text.trim()) return
+    
+    if ('speechSynthesis' in window) {
       // Cancel any ongoing speech
-      synthRef.current.cancel()
+      window.speechSynthesis.cancel()
       
-      const utterance = new SpeechSynthesisUtterance(text)
-      utterance.rate = 0.9
-      utterance.pitch = 1
-      utterance.volume = 1
-      synthRef.current.speak(utterance)
+      // Small delay to ensure cancellation is processed
+      setTimeout(() => {
+        const utterance = new SpeechSynthesisUtterance(text.trim())
+        utterance.rate = 0.9
+        utterance.pitch = 1.0
+        utterance.volume = 1.0
+        utterance.lang = 'en-US'
+        
+        utterance.onstart = () => {
+          console.log('TTS started:', text)
+        }
+        
+        utterance.onend = () => {
+          console.log('TTS ended')
+        }
+        
+        utterance.onerror = (event) => {
+          console.error('TTS error:', event.error)
+        }
+        
+        window.speechSynthesis.speak(utterance)
+      }, 100)
+    } else {
+      console.warn('Text-to-speech is not supported in this browser.')
     }
   }, [])
 
-  const processQuery = useCallback(async (queryText) => {
-    if (!queryText.trim()) return
+  // Handle query - send to backend and process response
+  const handleQuery = useCallback(async (text) => {
+    if (!text || !text.trim()) {
+      console.log('Empty text, skipping query')
+      return
+    }
 
-    // Add user message to chat
+    console.log('Processing query:', text)
+    setIsProcessing(true)
+    setStatus('Processing...')
+    setError('')
+
+    // 1. Add user message to UI
     const userMessage = {
       id: Date.now(),
-      text: queryText,
+      text: text.trim(),
       sender: 'user',
       timestamp: new Date()
     }
     setMessages(prev => [...prev, userMessage])
+
+    // 5. Increment query count
     setQueryCount(prev => prev + 1)
 
     try {
-      // Send query to backend
+      // 2. Send to FastAPI backend
       const response = await fetch(`${API_BASE_URL}/api/process-query`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ text: queryText }),
+        body: JSON.stringify({ text: text.trim() }),
       })
 
       if (!response.ok) {
@@ -54,135 +88,230 @@ function App() {
       }
 
       const data = await response.json()
+      console.log('Backend response:', data)
 
-      // Add bot response to chat
+      // 3. Add bot response to UI
       const botMessage = {
         id: Date.now() + 1,
         text: data.response_text,
         sender: 'bot',
         intent: data.intent,
-        action: data.action_taken,
         timestamp: new Date()
       }
       setMessages(prev => [...prev, botMessage])
 
-      // Speak the response
-      speakText(data.response_text)
+      setIsProcessing(false)
+      setStatus('Idle')
+
+      // 4. Trigger Text-to-Speech (TTS) - Wait a bit for UI to update
+      setTimeout(() => {
+        speakText(data.response_text)
+      }, 300)
+
     } catch (err) {
       console.error('Error processing query:', err)
+      setIsProcessing(false)
+      setStatus('Idle')
+      
       const errorMessage = {
         id: Date.now() + 1,
-        text: `Sorry, I encountered an error: ${err.message}. Please make sure the backend server is running.`,
+        text: `Sorry, I encountered an error: ${err.message}. Please make sure the backend server is running on port 8000.`,
         sender: 'bot',
         timestamp: new Date()
       }
       setMessages(prev => [...prev, errorMessage])
       setError(err.message)
+      
+      setTimeout(() => {
+        speakText("I'm sorry, I encountered an error. Please check if the backend server is running.")
+      }, 300)
     }
-
-    // Clear transcript
-    setTranscript('')
   }, [speakText])
 
-  // Initialize Speech Recognition
-  useEffect(() => {
-    if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
-      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition
-      recognitionRef.current = new SpeechRecognition()
-      
-      recognitionRef.current.continuous = false
-      recognitionRef.current.interimResults = true
-      recognitionRef.current.lang = 'en-US'
-
-      recognitionRef.current.onstart = () => {
-        setIsListening(true)
-        setError('')
-        finalTranscriptRef.current = ''
-      }
-
-      recognitionRef.current.onresult = (event) => {
-        let interimTranscript = ''
-        let finalTranscript = ''
-
-        for (let i = event.resultIndex; i < event.results.length; i++) {
-          const transcript = event.results[i][0].transcript
-          if (event.results[i].isFinal) {
-            finalTranscript += transcript + ' '
-          } else {
-            interimTranscript += transcript
-          }
-        }
-
-        if (finalTranscript) {
-          const finalText = finalTranscript.trim()
-          finalTranscriptRef.current = finalText
-          setTranscript(finalText)
-        } else {
-          setTranscript(interimTranscript)
-        }
-      }
-
-      recognitionRef.current.onerror = (event) => {
-        console.error('Speech recognition error:', event.error)
-        setError(`Speech recognition error: ${event.error}`)
-        setIsListening(false)
-      }
-
-      recognitionRef.current.onend = () => {
-        setIsListening(false)
-        // Process the query if we have a final transcript
-        if (finalTranscriptRef.current.trim()) {
-          processQuery(finalTranscriptRef.current.trim())
-        }
-      }
-    } else {
-      setError('Speech recognition is not supported in this browser. Please use Chrome, Edge, or Safari.')
+  // Create a fresh recognition instance each time
+  const createRecognition = useCallback(() => {
+    // Strict browser check
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition
+    
+    if (!SpeechRecognition) {
+      setError("Browser not supported. Please use Chrome or Edge.")
+      return null
     }
 
-    // Initialize Speech Synthesis
-    if ('speechSynthesis' in window) {
-      synthRef.current = window.speechSynthesis
-    } else {
-      setError('Text-to-speech is not supported in this browser.')
-    }
+    // Create new recognition instance
+    const recognition = new SpeechRecognition()
+    recognition.continuous = false
+    recognition.interimResults = true  // Show interim results
+    recognition.lang = 'en-US'
+    recognition.maxAlternatives = 1
 
-    return () => {
-      if (recognitionRef.current) {
-        recognitionRef.current.stop()
-      }
-      if (synthRef.current) {
-        synthRef.current.cancel()
-      }
-    }
-  }, [processQuery])
-
-  const startListening = () => {
-    if (recognitionRef.current && !isListening) {
-      setTranscript('')
+    recognition.onstart = () => {
+      console.log('Recognition started')
+      setIsListening(true)
+      setStatus('Listening...')
       setError('')
-      recognitionRef.current.start()
+      setTranscript('')
+      isRecognitionActiveRef.current = true
     }
-  }
 
-  const stopListening = () => {
-    if (recognitionRef.current && isListening) {
-      recognitionRef.current.stop()
+    recognition.onresult = (event) => {
+      let interimTranscript = ''
+      let finalTranscript = ''
+
+      // Process all results
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const transcript = event.results[i][0].transcript
+        if (event.results[i].isFinal) {
+          finalTranscript += transcript + ' '
+        } else {
+          interimTranscript += transcript
+        }
+      }
+
+      // Update transcript display
+      if (interimTranscript) {
+        setTranscript(interimTranscript)
+      }
+
+      // If we have final transcript, process it
+      if (finalTranscript.trim()) {
+        const finalText = finalTranscript.trim()
+        console.log('Final transcript:', finalText)
+        setTranscript(finalText)
+        // Stop recognition before processing
+        recognition.stop()
+        // Process the query
+        handleQuery(finalText)
+      }
     }
-  }
 
-  const handleButtonPress = () => {
-    if (isListening) {
+    recognition.onerror = (event) => {
+      console.error('Speech recognition error:', event.error)
+      isRecognitionActiveRef.current = false
+      setIsListening(false)
+      setStatus('Idle')
+      
+      // Handle specific errors
+      if (event.error === 'no-speech') {
+        setError('No speech detected. Please try speaking again.')
+        setTranscript('')
+      } else if (event.error === 'audio-capture') {
+        setError('No microphone found. Please check your microphone settings.')
+      } else if (event.error === 'not-allowed') {
+        setError('Microphone permission denied. Please allow microphone access in your browser settings.')
+      } else if (event.error === 'network') {
+        setError('Network error. Please check your internet connection and try again.')
+      } else if (event.error === 'aborted') {
+        // User stopped, don't show error
+        console.log('Recognition aborted by user')
+      } else {
+        setError(`Speech recognition error: ${event.error}. Please try again.`)
+      }
+    }
+
+    recognition.onend = () => {
+      console.log('Recognition ended')
+      isRecognitionActiveRef.current = false
+      setIsListening(false)
+      if (status === 'Listening...') {
+        setStatus('Idle')
+      }
+      // Clear recognition ref so we can create a new one
+      recognitionRef.current = null
+    }
+
+    return recognition
+  }, [handleQuery, status])
+
+  // Start listening function
+  const startListening = useCallback(() => {
+    // Check browser support first
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition
+    
+    if (!SpeechRecognition) {
+      alert("Browser not supported. Please use Chrome or Edge.")
+      return
+    }
+
+    // Don't start if already listening or processing
+    if (isListening || isProcessing || isRecognitionActiveRef.current) {
+      console.log('Already listening or processing')
+      return
+    }
+
+    // Create fresh recognition instance
+    const recognition = createRecognition()
+    if (!recognition) {
+      return
+    }
+
+    recognitionRef.current = recognition
+
+    try {
+      recognition.start()
+      console.log('Starting recognition...')
+    } catch (err) {
+      console.error('Error starting recognition:', err)
+      if (err.message && err.message.includes('already started')) {
+        // Recognition was already started, stop it first
+        try {
+          recognition.stop()
+        } catch (e) {
+          console.error('Error stopping recognition:', e)
+        }
+        // Try again after a short delay
+        setTimeout(() => {
+          try {
+            recognition.start()
+          } catch (e2) {
+            setError('Failed to start speech recognition. Please try again.')
+          }
+        }, 100)
+      } else {
+        setError('Failed to start speech recognition. Please try again.')
+      }
+    }
+  }, [isListening, isProcessing, createRecognition])
+
+  // Stop listening function
+  const stopListening = useCallback(() => {
+    if (recognitionRef.current && isRecognitionActiveRef.current) {
+      try {
+        recognitionRef.current.stop()
+        console.log('Stopping recognition...')
+      } catch (err) {
+        console.error('Error stopping recognition:', err)
+      }
+    }
+    setIsListening(false)
+    setStatus('Idle')
+    isRecognitionActiveRef.current = false
+  }, [])
+
+  // Button handlers
+  const handleButtonClick = () => {
+    if (isListening || isRecognitionActiveRef.current) {
       stopListening()
-    } else {
+    } else if (!isProcessing) {
       startListening()
     }
   }
 
-  const handleButtonRelease = () => {
-    if (isListening) {
-      stopListening()
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (recognitionRef.current) {
+        try {
+          recognitionRef.current.stop()
+        } catch (err) {
+          console.error('Error cleaning up recognition:', err)
+        }
+      }
+      if (window.speechSynthesis) {
+        window.speechSynthesis.cancel()
+      }
     }
-  }
+  }, [])
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 flex flex-col">
@@ -206,9 +335,7 @@ function App() {
             </div>
             <div className="bg-green-50 rounded-lg p-4">
               <p className="text-sm text-gray-600">Status</p>
-              <p className="text-2xl font-bold text-green-600">
-                {isListening ? 'Listening...' : 'Ready'}
-              </p>
+              <p className="text-2xl font-bold text-green-600">{status}</p>
             </div>
             <div className="bg-purple-50 rounded-lg p-4">
               <p className="text-sm text-gray-600">Messages</p>
@@ -222,7 +349,8 @@ function App() {
           <h2 className="text-xl font-semibold text-gray-800 mb-4">Conversation</h2>
           {messages.length === 0 ? (
             <div className="text-center text-gray-500 py-8">
-              <p>No messages yet. Press and hold the microphone button to start talking!</p>
+              <p>No messages yet. Click the microphone button to start talking!</p>
+              <p className="text-xs mt-2">Make sure to allow microphone access when prompted.</p>
             </div>
           ) : (
             <div className="space-y-4">
@@ -241,7 +369,7 @@ function App() {
                     <p className="text-sm">{message.text}</p>
                     {message.intent && (
                       <p className="text-xs mt-1 opacity-75">
-                        Intent: {message.intent} | {message.action}
+                        Intent: {message.intent}
                       </p>
                     )}
                     <p className="text-xs mt-1 opacity-60">
@@ -254,34 +382,44 @@ function App() {
           )}
         </div>
 
-        {/* Error Display */}
-        {error && (
-          <div className="bg-red-50 border border-red-200 rounded-lg p-4 mb-6">
-            <p className="text-red-800 text-sm">{error}</p>
-          </div>
-        )}
-
         {/* Transcript Display */}
         {transcript && (
           <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4 mb-6">
             <p className="text-sm text-gray-700">
-              <span className="font-semibold">You said:</span> {transcript}
+              <span className="font-semibold">Listening:</span> {transcript}
             </p>
           </div>
         )}
 
+        {/* Error Display */}
+        {error && (
+          <div className="bg-red-50 border border-red-200 rounded-lg p-4 mb-6">
+            <p className="text-red-800 text-sm font-semibold">Error:</p>
+            <p className="text-red-800 text-sm">{error}</p>
+            <button
+              onClick={() => {
+                setError('')
+                setTranscript('')
+              }}
+              className="mt-2 text-xs text-red-600 hover:text-red-800 underline"
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
+
         {/* Microphone Button */}
-        <div className="flex justify-center">
+        <div className="flex justify-center mb-6">
           <button
-            onMouseDown={handleButtonPress}
-            onMouseUp={handleButtonRelease}
-            onTouchStart={handleButtonPress}
-            onTouchEnd={handleButtonRelease}
+            onClick={handleButtonClick}
+            disabled={isProcessing}
             className={`w-32 h-32 rounded-full flex items-center justify-center shadow-lg transition-all duration-200 ${
               isListening
                 ? 'bg-red-500 hover:bg-red-600 animate-pulse'
+                : isProcessing
+                ? 'bg-yellow-500 hover:bg-yellow-600'
                 : 'bg-indigo-600 hover:bg-indigo-700'
-            } text-white focus:outline-none focus:ring-4 focus:ring-indigo-300`}
+            } text-white focus:outline-none focus:ring-4 focus:ring-indigo-300 disabled:opacity-50 disabled:cursor-not-allowed`}
             aria-label={isListening ? 'Stop listening' : 'Start listening'}
           >
             {isListening ? (
@@ -295,6 +433,27 @@ function App() {
                   fillRule="evenodd"
                   d="M10 18a8 8 0 100-16 8 8 0 000 16zM8 7a1 1 0 012 0v4a1 1 0 11-2 0V7zM5 9a1 1 0 011-1h1a1 1 0 110 2H6a1 1 0 01-1-1zm9-1a1 1 0 011 1v1a1 1 0 11-2 0V9a1 1 0 011-1z"
                   clipRule="evenodd"
+                />
+              </svg>
+            ) : isProcessing ? (
+              <svg
+                className="w-16 h-16 animate-spin"
+                fill="none"
+                viewBox="0 0 24 24"
+                xmlns="http://www.w3.org/2000/svg"
+              >
+                <circle
+                  className="opacity-25"
+                  cx="12"
+                  cy="12"
+                  r="10"
+                  stroke="currentColor"
+                  strokeWidth="4"
+                />
+                <path
+                  className="opacity-75"
+                  fill="currentColor"
+                  d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
                 />
               </svg>
             ) : (
@@ -317,10 +476,13 @@ function App() {
         {/* Instructions */}
         <div className="mt-6 text-center text-gray-600 text-sm">
           <p className="mb-2">
-            <strong>How to use:</strong> Press and hold the microphone button, speak your question, then release.
+            <strong>How to use:</strong> Click the microphone button, speak your question clearly, then wait for the response.
           </p>
           <p className="text-xs">
-            Try asking: "What's my account balance?", "What are your business hours?", "How can I contact support?"
+            Try asking: "What's my balance?", "What is your pricing?", "I need help with support"
+          </p>
+          <p className="text-xs mt-1 text-gray-500">
+            The bot will listen to your question, process it, and respond both in text and audio.
           </p>
         </div>
       </main>
@@ -336,4 +498,3 @@ function App() {
 }
 
 export default App
-
